@@ -1,8 +1,8 @@
 {
-  "name": "mixtli-backend-v2-sqlite",
-  "version": "2.0.0",
+  "name": "mixtli-backend-v2-sqlite3",
+  "version": "2.1.0",
   "type": "commonjs",
-  "description": "Mixtli backend with SQLite persistence, rate limiting, and cleanup",
+  "description": "Mixtli backend with sqlite3-only persistence, rate limiting, and cleanup",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -14,7 +14,6 @@
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.0",
-    "sqlite": "^4.2.2",
     "sqlite3": "^5.1.7"
   }
 }
