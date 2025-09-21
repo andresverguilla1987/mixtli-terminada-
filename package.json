@@ -1,8 +1,8 @@
 {
-  "name": "mixtli-mini-backend",
-  "version": "1.1.0",
+  "name": "mixtli-backend-v2-sqlite",
+  "version": "2.0.0",
   "type": "commonjs",
-  "description": "Backend mínimo para Mixtli (Express + S3/R2 presign + share tokens)",
+  "description": "Mixtli backend with SQLite persistence, rate limiting, and cleanup",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -12,6 +12,9 @@
     "@aws-sdk/s3-request-presigner": "^3.620.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.0",
+    "sqlite": "^4.2.2",
+    "sqlite3": "^5.1.7"
   }
 }

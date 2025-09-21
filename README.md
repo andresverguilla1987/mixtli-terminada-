@@ -1,10 +1,21 @@
-# Mixtli Mini Backend v1.1
-Novedades:
-- `GET /s/:token` → redirige (302) a un URL firmado de lectura (válido 5 min).
-- `GET /api/readlink?token=...` → devuelve JSON con el URL firmado.
+# Mixtli Backend v2 (SQLite + Rate limit + Cleanup)
+Deploy:
+- Build: `npm ci --omit=dev --no-audit --no-fund`
+- Start: `node server.js`
+- Monta un disk en Render y define `DATA_DIR=/data` para persistencia.
 
-## Netlify rewrites
-Para que tus links `https://TU-SITIO.netlify.app/s/<token>` funcionen, añade en `_redirects` del front:
-```
-/s/*  https://TU-BACKEND.onrender.com/s/:splat  200
-```
+Netlify `_redirects`:
+/s/*   https://TU-BACKEND.onrender.com/s/:splat   200
+/api/* https://TU-BACKEND.onrender.com/api/:splat 200
+/salud https://TU-BACKEND.onrender.com/salud      200
+
+R2 CORS:
+[
+  {
+    "AllowedOrigins": ["https://TU-SITIO.netlify.app"],
+    "AllowedMethods": ["PUT","GET","HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["etag"],
+    "MaxAgeSeconds": 86400
+  }
+]
