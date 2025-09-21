@@ -1,25 +1,17 @@
 {
-  "name": "mixtli-mini",
-  "version": "1.15.3",
-  "private": true,
-  "type": "module",
+  "name": "mixtli-mini-backend",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "description": "Backend mínimo para Mixtli (Express + S3/R2 presign)",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.645.0",
-    "@aws-sdk/s3-request-presigner": "^3.645.0",
-    "archiver": "^7.0.1",
-    "bcryptjs": "^2.4.3",
+    "@aws-sdk/client-s3": "^3.620.0",
+    "@aws-sdk/s3-request-presigner": "^3.620.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "exifr": "^7.1.3",
-    "express": "^4.19.2",
-    "express-rate-limit": "^7.4.0",
-    "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.0",
-    "node-fetch": "^3.3.2",
-    "sharp": "^0.33.4",
-    "sqlite": "5.1.1",
-    "sqlite3": "^5.1.7"
+    "express": "^4.19.2"
   }
 }
