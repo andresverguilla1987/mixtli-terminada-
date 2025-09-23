@@ -1,4 +1,4 @@
-// Mixtli Backend v2.1 — SQLite3 only (sin paquete 'sqlite')
+// Backend Mixtli v2.2 — fallback de DATA_DIR + trust proxy + rate limit
 require('dotenv/config');
 const fs = require('fs');
 const path = require('path');
@@ -6,7 +6,8 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
-const { Database } = require('sqlite3');
+const { open } = require('sqlite');
+const sqlite3 = require('sqlite3');
 const { S3Client, PutObjectCommand, ListObjectsV2Command, HeadObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 
@@ -27,32 +28,30 @@ const S3 = new S3Client({
 });
 const BUCKET = process.env.S3_BUCKET;
 
-// --------- DB (sqlite3 callbacks) ----------
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
-fs.mkdirSync(DATA_DIR, { recursive: true });
+// --- DATA_DIR con fallback robusto ---
+function ensureDataDir() {
+  const primary = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+  try {
+    fs.mkdirSync(primary, { recursive: true });
+    return primary;
+  } catch (e) {
+    console.warn('[warn] no se pudo crear DATA_DIR=', primary, '→ usando ./data');
+    const fallback = path.join(process.cwd(), 'data');
+    fs.mkdirSync(fallback, { recursive: true });
+    return fallback;
+  }
+}
+const DATA_DIR = ensureDataDir();
 const DB_PATH = path.join(DATA_DIR, 'mixtli.sqlite');
 
-const db = new Database(DB_PATH);
-db.serialize(() => {
-  db.run(`CREATE TABLE IF NOT EXISTS links (
-    token TEXT PRIMARY KEY,
-    s3key TEXT NOT NULL,
-    expiresAt INTEGER NOT NULL
-  )`);
-  db.run(`CREATE INDEX IF NOT EXISTS idx_links_expires ON links (expiresAt)`);
-});
-const nowSec = () => Math.floor(Date.now()/1000);
-const sanitizeName = (name='') => name.replace(/[^\w.\-]+/g, '_').slice(0, 180);
-const genId = (n=16) => crypto.randomBytes(n).toString('base64url');
-
-function dbRun(sql, params=[]) { return new Promise((resolve,reject)=> db.run(sql, params, function(err){ if(err) reject(err); else resolve(this); })); }
-function dbGet(sql, params=[]) { return new Promise((resolve,reject)=> db.get(sql, params, (err,row)=> err?reject(err):resolve(row||null))); }
-
-// --------- App ----------
+// App
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// CORS estricto
+// Render/Netlify behind proxy → necesario para express-rate-limit
+app.set('trust proxy', true);
+
+// CORS
 app.use(cors({
   origin(origin, cb) {
     if (!origin) return cb(null, false);
@@ -68,11 +67,11 @@ app.use(cors({
 }));
 
 // Token opcional
-app.use((req, res, next) => {
-  if (!REQUIRE_TOKEN) return next();
-  const token = req.header('x-mixtli-token');
-  if (token && token === process.env.MIXTLI_TOKEN) return next();
-  return res.status(401).json({ ok: false, error: 'missing or invalid x-mixtli-token' });
+app.use((req,res,next)=>{
+  if(!REQUIRE_TOKEN) return next();
+  const t = req.header('x-mixtli-token');
+  if (t && t===process.env.MIXTLI_TOKEN) return next();
+  return res.status(401).json({ ok:false, error:'missing or invalid x-mixtli-token' });
 });
 
 // Rate limit
@@ -81,117 +80,115 @@ const limiter = rateLimit({
   max: Number(process.env.RATE_MAX || 60),
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: (req) => req.ip,
 });
 app.use(['/api/presign','/api/list','/api/readlink'], limiter);
 
-// Salud
-app.get('/salud', (req, res) => res.type('text').send('ok'));
+// Utils
+const sanitizeName = (name='') => name.replace(/[^\w.\-]+/g, '_').slice(0, 180);
+const genId = (n=16) => crypto.randomBytes(n).toString('base64url');
+const nowSec = () => Math.floor(Date.now()/1000);
 
-// Presign
-app.post('/api/presign', async (req, res) => {
-  try {
-    const { name, size, type, mode } = req.body || {};
-    if (!name || typeof size !== 'number') return res.status(400).json({ ok: false, error: 'name/size required' });
-    if (!BUCKET || !process.env.S3_ENDPOINT) return res.status(500).json({ ok: false, error: 'S3 config missing' });
+// Routes
+app.get('/salud', (req,res)=> res.type('text').send('ok'));
+
+let db;
+(async ()=>{
+  db = await open({ filename: DB_PATH, driver: sqlite3.Database });
+  await db.exec(`CREATE TABLE IF NOT EXISTS links (
+    token TEXT PRIMARY KEY,
+    s3key TEXT NOT NULL,
+    expiresAt INTEGER NOT NULL
+  );`);
+  await db.exec(`CREATE INDEX IF NOT EXISTS idx_links_expires ON links (expiresAt);`);
+})();
+
+app.post('/api/presign', async (req,res)=>{
+  try{
+    const { name, size, type, mode } = req.body||{};
+    if (!name || typeof size !== 'number') return res.status(400).json({ ok:false, error:'name/size required' });
+    if (!BUCKET || !process.env.S3_ENDPOINT) return res.status(500).json({ ok:false, error:'S3 config missing' });
 
     const MAX_BYTES = Number(process.env.MAX_BYTES || (2*1024*1024*1024));
-    if (size > MAX_BYTES) return res.status(413).json({ ok: false, error: `size exceeds limit ${MAX_BYTES}` });
+    if (size > MAX_BYTES) return res.status(413).json({ ok:false, error:`size exceeds limit ${MAX_BYTES}` });
 
     const safe = sanitizeName(String(name));
     const prefix = mode === 'cloud' ? 'cloud' : 'link';
     const key = `${prefix}/${new Date().toISOString().slice(0,10)}/${genId(8)}-${safe}`;
 
     const contentType = type || 'application/octet-stream';
-    const url = await getSignedUrl(S3, new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }), { expiresIn: 60 * 15 });
+    const url = await getSignedUrl(S3, new PutObjectCommand({ Bucket: BUCKET, Key: key, ContentType: contentType }), { expiresIn: 60*15 });
 
-    const resp = { ok: true, url, headers: { 'Content-Type': contentType } };
+    const resp = { ok:true, url, headers:{ 'Content-Type': contentType } };
     if (prefix === 'link') {
       const token = genId(18);
       const ttlDays = Number(process.env.LINK_TTL_DAYS || 7);
       const expiresAt = nowSec() + ttlDays*24*60*60;
-      await dbRun(`INSERT OR REPLACE INTO links(token,s3key,expiresAt) VALUES(?,?,?)`, [token, key, expiresAt]);
+      await db.run(`INSERT OR REPLACE INTO links(token,s3key,expiresAt) VALUES(?,?,?)`, token, key, expiresAt);
       resp.token = token;
-      resp.expiresAt = new Date(expiresAt * 1000).toISOString();
+      resp.expiresAt = new Date(expiresAt*1000).toISOString();
     }
+
     res.json(resp);
-  } catch (err) {
-    console.error('presign error:', err);
-    res.status(500).json({ ok: false, error: String(err.message || err) });
-  }
+  }catch(e){ console.error('presign error:', e); res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-// List
-app.get('/api/list', async (req, res) => {
-  try {
+app.get('/api/list', async (req,res)=>{
+  try{
     const Prefix = 'cloud/';
-    let files = [];
-    let ContinuationToken = undefined;
-    do {
+    let files=[], ContinuationToken;
+    do{
       const out = await S3.send(new ListObjectsV2Command({ Bucket: BUCKET, Prefix, MaxKeys: 200, ContinuationToken }));
-      (out.Contents || []).forEach(obj => {
-        if (!obj.Key || obj.Key.endsWith('/')) return;
-        const name = obj.Key.split('/').slice(2).join('/') || obj.Key;
-        files.push({ key: obj.Key, name, size: Number(obj.Size || 0) });
+      (out.Contents||[]).forEach(o=>{
+        if(!o.Key || o.Key.endsWith('/')) return;
+        const name = o.Key.split('/').slice(2).join('/') || o.Key;
+        files.push({ key:o.Key, name, size:Number(o.Size||0) });
       });
       ContinuationToken = out.IsTruncated ? out.NextContinuationToken : undefined;
-    } while (ContinuationToken && files.length < 200);
+    }while(ContinuationToken && files.length<200);
 
-    const signed = await Promise.all(files.map(async f => {
-      try {
+    const signed = await Promise.all(files.map(async f=>{
+      try{
         const head = await S3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: f.key }));
-        const getUrl = await getSignedUrl(S3, new GetObjectCommand({ Bucket: BUCKET, Key: f.key }), { expiresIn: 3600 });
-        return { ...f, contentType: head.ContentType || null, url: getUrl };
-      } catch { return f; }
+        const url = await getSignedUrl(S3, new GetObjectCommand({ Bucket: BUCKET, Key: f.key }), { expiresIn: 3600 });
+        return { ...f, contentType: head.ContentType||null, url };
+      }catch{ return f; }
     }));
-
-    res.json({ ok: true, files: signed });
-  } catch (err) {
-    console.error('list error:', err);
-    res.status(500).json({ ok: false, error: String(err.message || err) });
-  }
+    res.json({ ok:true, files: signed });
+  }catch(e){ console.error('list error:', e); res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-// Readlink JSON
-app.get('/api/readlink', async (req, res) => {
-  try {
-    const token = (req.query.token || req.query.t || '').toString();
-    if (!token) return res.status(400).json({ ok: false, error: 'token required' });
-    const row = await dbGet(`SELECT token,s3key,expiresAt FROM links WHERE token=?`, [token]);
-    if (!row) return res.status(404).json({ ok: false, error: 'token not found' });
-    if (row.expiresAt <= nowSec()) { await dbRun(`DELETE FROM links WHERE token=?`, [token]); return res.status(410).json({ ok: false, error: 'token expired' }); }
+app.get('/api/readlink', async (req,res)=>{
+  try{
+    const token = (req.query.token||req.query.t||'').toString();
+    if(!token) return res.status(400).json({ ok:false, error:'token required' });
+    const row = await db.get(`SELECT token,s3key,expiresAt FROM links WHERE token=?`, token);
+    if(!row) return res.status(404).json({ ok:false, error:'token not found' });
+    if(row.expiresAt <= nowSec()){ await db.run(`DELETE FROM links WHERE token=?`, token); return res.status(410).json({ ok:false, error:'token expired' }); }
     const url = await getSignedUrl(S3, new GetObjectCommand({ Bucket: BUCKET, Key: row.s3key }), { expiresIn: 300 });
-    res.json({ ok: true, url, key: row.s3key, expiresIn: 300 });
-  } catch (err) {
-    console.error('readlink error:', err);
-    res.status(500).json({ ok: false, error: String(err.message || err) });
-  }
+    res.json({ ok:true, url, key: row.s3key, expiresIn: 300 });
+  }catch(e){ console.error('readlink error:', e); res.status(500).json({ ok:false, error:String(e.message||e) }); }
 });
 
-// Share redirect
-app.get('/s/:token', async (req, res) => {
-  try {
+app.get('/s/:token', async (req,res)=>{
+  try{
     const token = req.params.token;
-    const row = await dbGet(`SELECT token,s3key,expiresAt FROM links WHERE token=?`, [token]);
-    if (!row) return res.status(404).type('text').send('Link no encontrado');
-    if (row.expiresAt <= nowSec()) { await dbRun(`DELETE FROM links WHERE token=?`, [token]); return res.status(410).type('text').send('Link expirado'); }
+    const row = await db.get(`SELECT token,s3key,expiresAt FROM links WHERE token=?`, token);
+    if(!row) return res.status(404).type('text').send('Link no encontrado');
+    if(row.expiresAt <= nowSec()){ await db.run(`DELETE FROM links WHERE token=?`, token); return res.status(410).type('text').send('Link expirado'); }
     const url = await getSignedUrl(S3, new GetObjectCommand({ Bucket: BUCKET, Key: row.s3key }), { expiresIn: 300 });
     res.redirect(302, url);
-  } catch (err) {
-    console.error('s/:token error:', err);
-    res.status(500).type('text').send('Error al generar link');
-  }
+  }catch(e){ console.error('s/:token error:', e); res.status(500).type('text').send('Error al generar link'); }
 });
 
-// Limpieza automática
-setInterval(async () => {
-  try {
-    const res = await dbRun(`DELETE FROM links WHERE expiresAt <= ?`, [nowSec()]);
-    if (res && res.changes) console.log(`[cleanup] removed ${res.changes} expired links`);
-  } catch (e) {
-    console.error('[cleanup] error:', e);
-  }
-}, CLEANUP_INTERVAL_MIN * 60 * 1000);
+// limpieza periódica
+setInterval(async ()=>{
+  try{
+    const removed = await db.run(`DELETE FROM links WHERE expiresAt <= ?`, nowSec());
+    if(removed && removed.changes) console.log(`[cleanup] removed ${removed.changes}`);
+  }catch(e){ console.error('[cleanup]', e); }
+}, CLEANUP_INTERVAL_MIN*60*1000);
 
 app.use((req,res)=> res.status(404).json({ ok:false, error:'Not Found' }));
 
-app.listen(PORT, () => console.log(`Mixtli Backend v2.1 on :${PORT} (db=${DB_PATH})`));
+app.listen(PORT, ()=> console.log(`Mixtli Backend v2.2 on :${PORT} (db=${DB_PATH})`));
