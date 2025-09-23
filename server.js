@@ -1,4 +1,4 @@
-// server.js (root)
+// server.js
 require("dotenv").config();
 const express = require("express");
 const morgan = require("morgan");
@@ -19,7 +19,11 @@ const app = express();
 app.use(express.json({ limit: "5mb" }));
 app.use(morgan("tiny"));
 
-// CORS fino sin paquete (para no duplicar config con cors())
+// Basic root handlers for Render health pings
+app.get("/", (_req, res) => res.type("text").send("Mixtli up"));
+app.head("/", (_req, res) => res.status(200).end());
+
+// CORS light
 const ALLOWED = (() => {
   try { return JSON.parse(process.env.ALLOWED_ORIGINS || "[]"); } catch { return []; }
 })();
@@ -41,7 +45,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// proxy awareness
+// proxy awareness & rate limit
 app.set("trust proxy", 1);
 const limiter = rateLimit({ windowMs: 60_000, limit: 300 });
 app.use(limiter);
@@ -239,5 +243,5 @@ setInterval(cleanup, 10 * 60 * 1000);
 
 const port = Number(process.env.PORT || 10000);
 app.listen(port, () => {
-  console.log(`Mixtli Backend fix-min on :${port}`);
+  console.log(`Mixtli Backend fix-min root on :${port}`);
 });
