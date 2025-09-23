@@ -1,0 +1,48 @@
+# Render Blueprint for Mixtli Transfer Backend (tailored)
+services:
+  - type: web
+    name: mixtli-transfer-backend
+    env: node
+    region: oregon          # cerca de MX
+    plan: starter           # cámbialo a free/standard si quieres
+    branch: main
+    autoDeploy: true
+    buildCommand: |
+      npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+    startCommand: node server.js
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PORT
+        value: "10000"
+      - key: ALLOWED_ORIGINS
+        value: '["https://lovely-bienenstitch-6344a1.netlify.app","http://localhost:5173"]'
+
+      - key: UPLOAD_PREFIX
+        value: "uploads/"
+
+      # --- Cloudflare R2 (S3 compatible) ---
+      - key: S3_ENDPOINT
+        value: "https://<accountid>.r2.cloudflarestorage.com"
+      - key: S3_BUCKET
+        value: "<tu-bucket>"
+      - key: S3_REGION
+        value: "auto"
+      - key: S3_FORCE_PATH_STYLE
+        value: "true"
+
+      - key: S3_ACCESS_KEY_ID
+        fromSecret: r2-access-key-id
+      - key: S3_SECRET_ACCESS_KEY
+        fromSecret: r2-secret-access-key
+
+      - key: PRESIGN_EXPIRES
+        value: "900"
+
+      # Seguridad opcional
+      - key: REQUIRE_TOKEN
+        value: "false"
+      - key: X_MIXTLI_TOKEN
+        fromSecret: mixtli-token-privado
