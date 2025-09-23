@@ -1,247 +1,285 @@
 // server.js
-require("dotenv").config();
+// Mixtli Backend (R2/B2 presign PUT con URL firmada + commit en SQLite)
+
 const express = require("express");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
-const { nanoid } = require("nanoid");
-const { db } = require("./src/db");
-const {
-  primary,
-  PRIMARY_BUCKET,
-  linkStore,
-  LINK_BUCKET,
-  PutObjectCommand,
-  DeleteObjectCommand,
-  HeadObjectCommand,
-} = require("./src/storage");
+const fs = require("fs");
+const path = require("path");
 
+// --- AWS SDK v3 (S3 + signer)
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+const { getSignedUrl } = require("@aws-sdk/s3-request-presigner");
+
+// --- SQLite (archivo local, no /data para evitar EACCES en Render)
+const sqlite3 = require("sqlite3").verbose();
+
+// =========================
+// Config básica
+// =========================
+const PORT = process.env.PORT || 10000;
+const NODE_ENV = process.env.NODE_ENV || "production";
+
+// Crea carpeta ./data si no existe
+const DATA_DIR = path.join(__dirname, "data");
+if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+
+const DB_PATH = path.join(DATA_DIR, "mixtli.sqlite");
+
+// =========================
+// DB
+// =========================
+const db = new sqlite3.Database(DB_PATH);
+db.serialize(() => {
+  db.run(`
+    CREATE TABLE IF NOT EXISTS uploads (
+      id TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      key TEXT NOT NULL,
+      size INTEGER NOT NULL,
+      createdAt INTEGER NOT NULL
+    )
+  `);
+});
+
+// =========================
+/**
+ * S3 client segun proveedor (R2/B2)
+ * Env esperados:
+ *   STORAGE_PROVIDER = r2 | b2
+ *
+ *   R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+ *   R2_BUCKET=mixtli-bucket
+ *   R2_ACCESS_KEY_ID=***
+ *   R2_SECRET_ACCESS_KEY=***
+ *
+ *   B2_ENDPOINT=https://s3.us-east-005.backblazeb2.com
+ *   B2_BUCKET=mixtli-bucket
+ *   B2_ACCESS_KEY_ID=***
+ *   B2_SECRET_ACCESS_KEY=***
+ *   B2_REGION=us-east-005    (opcional)
+ */
+// =========================
+function makeS3ForPresign() {
+  const provider = (process.env.STORAGE_PROVIDER || "r2").toLowerCase();
+
+  if (provider === "r2") {
+    const { R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET } = process.env;
+    if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_BUCKET) {
+      throw new Error("Variables R2 incompletas (R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY/R2_BUCKET)");
+    }
+    return {
+      s3: new S3Client({
+        region: "auto",
+        endpoint: R2_ENDPOINT,
+        forcePathStyle: false,
+        credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+      }),
+      bucket: R2_BUCKET,
+    };
+  }
+
+  if (provider === "b2") {
+    const {
+      B2_ENDPOINT,
+      B2_ACCESS_KEY_ID,
+      B2_SECRET_ACCESS_KEY,
+      B2_BUCKET,
+      B2_REGION = "us-east-005",
+    } = process.env;
+    if (!B2_ENDPOINT || !B2_ACCESS_KEY_ID || !B2_SECRET_ACCESS_KEY || !B2_BUCKET) {
+      throw new Error("Variables B2 incompletas (B2_ENDPOINT/B2_ACCESS_KEY_ID/B2_SECRET_ACCESS_KEY/B2_BUCKET)");
+    }
+    return {
+      s3: new S3Client({
+        region: B2_REGION,
+        endpoint: B2_ENDPOINT,
+        forcePathStyle: false,
+        credentials: { accessKeyId: B2_ACCESS_KEY_ID, secretAccessKey: B2_SECRET_ACCESS_KEY },
+      }),
+      bucket: B2_BUCKET,
+    };
+  }
+
+  throw new Error("STORAGE_PROVIDER inválido (usa r2 o b2)");
+}
+
+// =========================
+// App
+// =========================
 const app = express();
-app.use(express.json({ limit: "5mb" }));
-app.use(morgan("tiny"));
 
-// Basic root handlers for Render health pings
-app.get("/", (_req, res) => res.type("text").send("Mixtli up"));
-app.head("/", (_req, res) => res.status(200).end());
+// Confianza en el proxy (Render) para que rate-limit no truene con X-Forwarded-For
+app.set("trust proxy", 1);
 
-// CORS light
-const ALLOWED = (() => {
-  try { return JSON.parse(process.env.ALLOWED_ORIGINS || "[]"); } catch { return []; }
+// Logs
+app.use(morgan(NODE_ENV === "production" ? "combined" : "dev"));
+
+// Body parsers
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: false }));
+
+// =========================
+// CORS manual (whitelist por env)
+// =========================
+const ALLOWED_ORIGINS = (() => {
+  try {
+    return JSON.parse(process.env.ALLOWED_ORIGINS || "[]"); // ej: ["https://tu-sitio.netlify.app"]
+  } catch {
+    return [];
+  }
 })();
-function isAllowed(origin) {
+
+function isAllowedOrigin(origin) {
   if (!origin) return false;
-  if (ALLOWED.includes(origin)) return true;
-  if (process.env.ALLOW_NETLIFY_WILDCARD === "true" && /^https:\/\/[a-z0-9-]+\.netlify\.app$/.test(origin)) return true;
+  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  // wildcard opcional para deploy previews de Netlify
+  if (
+    process.env.ALLOW_NETLIFY_WILDCARD === "true" &&
+    /^https:\/\/[a-z0-9-]+\.netlify\.app$/.test(origin)
+  ) {
+    return true;
+  }
   return false;
 }
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  if (isAllowed(origin)) {
+  if (isAllowedOrigin(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
     res.setHeader("Vary", "Origin");
   }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-mixtli-token");
+  // Si vas a usar cookies/sesiones:
+  // res.setHeader("Access-Control-Allow-Credentials", "true");
+
   if (req.method === "OPTIONS") return res.status(204).end();
-  next();
+  return next();
 });
 
-// proxy awareness & rate limit
-app.set("trust proxy", 1);
-const limiter = rateLimit({ windowMs: 60_000, limit: 300 });
+// =========================
+// Rate limit básico
+// =========================
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 app.use(limiter);
 
-// helpers
-const nowSec = () => Math.floor(Date.now() / 1000);
-const BYTES = (gb) => BigInt(gb) * 1024n * 1024n * 1024n;
-
-const LINK_TTL_DAYS = Number(process.env.LINK_TTL_DAYS || 7);
-const FREE_CLOUD_RETENTION_DAYS = Number(process.env.FREE_CLOUD_RETENTION_DAYS || 30);
-
-const PLANS = {
-  free: {
-    storage: BYTES(Number(process.env.PLAN_FREE_STORAGE_GB || 5)),
-    maxTransfer: 3n * 1024n * 1024n * 1024n,
-    priceMonthCents: 0,
-  },
-  lite: {
-    storage: BYTES(Number(process.env.PLAN_LITE_STORAGE_GB || 100)),
-    maxTransfer: 300n * 1024n * 1024n * 1024n,
-    priceMonthCents: Number(process.env.PRICE_LITE_MONTH_CENTS || 149),
-  },
-  pro: {
-    storage: BYTES(Number(process.env.PLAN_PRO_STORAGE_GB || 1024)),
-    maxTransfer: 300n * 1024n * 1024n * 1024n,
-    priceMonthCents: Number(process.env.PRICE_PRO_MONTH_CENTS || 699),
-  },
-  max: {
-    storage: BYTES(Number(process.env.PLAN_MAX_STORAGE_GB || 5120)),
-    maxTransfer: 300n * 1024n * 1024n * 1024n,
-    priceMonthCents: Number(process.env.PRICE_MAX_MONTH_CENTS || 899),
-  },
-};
-
-async function ensureUser(userId) {
-  return new Promise((resolve, reject) => {
-    db.get("SELECT id, plan FROM users WHERE id=?", userId, (err, row) => {
-      if (err) return reject(err);
-      if (row) return resolve(row);
-      const createdAt = nowSec();
-      db.run("INSERT INTO users(id,plan,createdAt) VALUES(?,?,?)", userId, "free", createdAt, (e) => {
-        if (e) return reject(e);
-        resolve({ id: userId, plan: "free" });
-      });
-    });
-  });
-}
+// =========================
+// Rutas básicas
+// =========================
+app.get("/", (req, res) => {
+  res.type("text/plain").send("Mixtli Backend • OK");
+});
+app.head("/", (req, res) => res.status(200).end());
 
 app.get("/api/health", (req, res) => {
-  res.json({ ok: true, provider: process.env.STORAGE_PROVIDER, linkProvider: process.env.LINK_PROVIDER });
+  res.json({ ok: true, ts: Date.now() });
 });
 
-app.get("/api/me/plan", async (req, res) => {
-  const userId = req.headers["x-mixtli-token"] || "anon-" + req.ip;
-  await ensureUser(userId);
-  db.get("SELECT plan FROM users WHERE id=?", userId, (err, row) => {
-    if (err) return res.status(500).json({ ok: false, error: err.message });
-    const plan = row?.plan || "free";
-    const p = PLANS[plan];
-    db.get("SELECT baseBytes, addonBytes, usedBytes FROM storage_wallet WHERE userId=?", userId, (e, w) => {
-      const baseBytes = w?.baseBytes || Number(p.storage.toString());
-      const addonBytes = w?.addonBytes || 0;
-      const usedBytes = w?.usedBytes || 0;
-      res.json({
-        ok: true,
-        plan,
-        storageBytes: String(baseBytes + addonBytes),
-        usedBytes: String(usedBytes),
-        maxTransferBytes: String(p.maxTransfer),
-      });
-    });
+app.get("/version", (req, res) => {
+  res.json({
+    name: "Mixtli Backend",
+    version: process.env.BUILD_VERSION || "fix-min",
+    provider: process.env.STORAGE_PROVIDER || "r2",
   });
 });
 
+// Simples “planes” por token demo
+app.get("/api/me/plan", (req, res) => {
+  const userId = req.headers["x-mixtli-token"] || "anon";
+  // Demo: si es user123 → free 5GB; cualquier otro → free 5GB
+  const plan = {
+    userId,
+    tier: "free",
+    quotaGB: 5,
+    usedGB: 0,
+    expiresAt: null,
+  };
+  res.json(plan);
+});
+
+// =========================
+// PRESIGN: devuelve URL firmada para PUT
+// =========================
 app.post("/api/presign", async (req, res) => {
   try {
-    const { mode, filename, size } = req.body || {};
-    const userId = req.headers["x-mixtli-token"] || "anon-" + req.ip;
-    const u = await ensureUser(userId);
-    const plan = u.plan || "free";
-    const p = PLANS[plan];
-    const fileId = require("nanoid").nanoid(12);
-    const keyPrefix = mode === "cloud"
-      ? (plan === "free" ? `cloud/free/${userId}/` : `cloud/perm/${userId}/`)
-      : `link/${userId}/`;
-    const s3key = keyPrefix + fileId + "-" + (filename || "file.bin");
+    const userId = req.headers["x-mixtli-token"] || "anon";
+    const { mode, filename, size, contentType } = req.body || {};
+    if (mode !== "link") return res.status(400).json({ ok: false, error: "mode inválido" });
+    if (!filename || typeof filename !== "string") return res.status(400).json({ ok: false, error: "filename requerido" });
+    if (typeof size !== "number" || !(size >= 0)) return res.status(400).json({ ok: false, error: "size requerido (number)" });
 
-    const sizeBig = BigInt(size || 0);
-    if (mode === "link" && sizeBig > p.maxTransfer) {
-      return res.status(413).json({ ok: false, error: "Archivo supera el máximo por link para tu plan." });
-    }
-    if (mode === "cloud") {
-      db.get("SELECT baseBytes, addonBytes, usedBytes FROM storage_wallet WHERE userId=?", userId, (e, w) => {
-        const cap = BigInt(w?.baseBytes || p.storage) + BigInt(w?.addonBytes || 0);
-        const used = BigInt(w?.usedBytes || 0);
-        if (used + sizeBig > cap) return res.status(403).json({ ok: false, error: "Sin espacio en tu nube." });
-        return res.json({
-          ok: true,
-          provider: process.env.STORAGE_PROVIDER,
-          bucket: PRIMARY_BUCKET,
-          key: s3key,
-          fileId,
-        });
-      });
-      return;
-    }
-    // link
-    return res.json({
-      ok: true,
-      provider: process.env.LINK_PROVIDER,
-      bucket: LINK_BUCKET,
-      key: s3key,
-      fileId,
+    const { s3, bucket } = makeS3ForPresign();
+
+    const rand = Math.random().toString(36).slice(2, 10);
+    const safeName = filename.replace(/[^\w.\-]/g, "_");
+    const key = `link/${userId}/${rand}-${safeName}`;
+
+    const cmd = new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      ContentType: contentType || "application/octet-stream",
     });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+
+    const url = await getSignedUrl(s3, cmd, { expiresIn: 60 * 10 }); // 10 min
+
+    const fileId = rand;
+    return res.json({ ok: true, url, key, fileId, bucket });
+  } catch (err) {
+    console.error("presign error:", err);
+    return res.status(500).json({ ok: false, error: String(err && err.message || err) });
   }
 });
 
-app.post("/api/commit", async (req, res) => {
+// =========================
+/**
+ * COMMIT: guarda registro en SQLite (llámalo después del PUT)
+ * body: { mode: "link", key, fileId, size }
+ */
+// =========================
+app.post("/api/commit", (req, res) => {
   try {
+    const userId = req.headers["x-mixtli-token"] || "anon";
     const { mode, key, fileId, size } = req.body || {};
-    const userId = req.headers["x-mixtli-token"] || "anon-" + req.ip;
-    const u = await ensureUser(userId);
-    const plan = u.plan || "free";
-    const now = nowSec();
+    if (mode !== "link") return res.status(400).json({ ok: false, error: "mode inválido" });
+    if (!key) return res.status(400).json({ ok: false, error: "key requerido" });
+    if (!fileId) return res.status(400).json({ ok: false, error: "fileId requerido" });
+    if (typeof size !== "number" || !(size >= 0)) return res.status(400).json({ ok: false, error: "size inválido" });
 
-    if (mode === "link") {
-      const expiresAt = now + (Number(process.env.LINK_TTL_DAYS || 7) * 86400);
-      db.run(
-        "INSERT INTO links(token,userId,s3key,sizeBytes,createdAt,expiresAt) VALUES(?,?,?,?,?,?)",
-        fileId, userId, key, Number(size || 0), now, expiresAt,
-        (e) => {
-          if (e) return res.status(500).json({ ok: false, error: e.message });
-          res.json({ ok: true, token: fileId, expiresAt });
-        }
-      );
-      return;
-    }
-
-    let expiresAt = null;
-    if (plan === "free") expiresAt = now + (Number(process.env.FREE_CLOUD_RETENTION_DAYS || 30) * 86400);
+    const createdAt = Date.now();
 
     db.run(
-      "INSERT INTO cloud_files(id,userId,s3key,sizeBytes,createdAt,expiresAt) VALUES(?,?,?,?,?,?)",
-      fileId, userId, key, Number(size || 0), now, expiresAt,
-      (e) => {
-        if (e) return res.status(500).json({ ok: false, error: e.message });
-        db.run(
-          "INSERT INTO storage_wallet(userId,baseBytes,addonBytes,usedBytes) VALUES(?,?,?,?) ON CONFLICT(userId) DO UPDATE SET usedBytes=usedBytes+excluded.usedBytes",
-          userId, Number(PLANS[plan].storage.toString()), 0, Number(size || 0),
-          (e2) => {
-            if (e2) return res.status(500).json({ ok: false, error: e2.message });
-            res.json({ ok: true, id: fileId, expiresAt });
-          }
-        );
+      "INSERT INTO uploads (id, userId, key, size, createdAt) VALUES (?, ?, ?, ?, ?)",
+      [fileId, userId, key, size, createdAt],
+      (err) => {
+        if (err) {
+          console.error("commit db error:", err);
+          return res.status(500).json({ ok: false, error: "db insert error" });
+        }
+        return res.json({ ok: true, token: fileId, key, size, createdAt });
       }
     );
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+  } catch (err) {
+    console.error("commit error:", err);
+    return res.status(500).json({ ok: false, error: String(err && err.message || err) });
   }
 });
 
-async function cleanup() {
-  const now = nowSec();
-  // links
-  db.all("SELECT token, s3key FROM links WHERE expiresAt <= ?", now, async (e, rows) => {
-    if (!e && rows?.length) {
-      for (const r of rows) {
-        try {
-          await linkStore.send(new DeleteObjectCommand({ Bucket: LINK_BUCKET, Key: r.s3key }));
-        } catch (err) {
-          console.warn("delete link failed", r.s3key, err?.name);
-        }
-      }
-      db.run("DELETE FROM links WHERE expiresAt <= ?", now, () => {});
-    }
-  });
-  // free cloud
-  db.all("SELECT id,s3key,userId,sizeBytes FROM cloud_files WHERE expiresAt IS NOT NULL AND expiresAt <= ?", now, async (e, rows) => {
-    if (!e && rows?.length) {
-      for (const r of rows) {
-        try {
-          await primary.send(new DeleteObjectCommand({ Bucket: PRIMARY_BUCKET, Key: r.s3key }));
-        } catch (err) {
-          console.warn("delete free cloud failed", r.s3key, err?.name);
-        }
-        db.run("UPDATE storage_wallet SET usedBytes = MAX(0, usedBytes - ?) WHERE userId=?", Number(r.sizeBytes || 0), r.userId, () => {});
-      }
-      db.run("DELETE FROM cloud_files WHERE expiresAt IS NOT NULL AND expiresAt <= ?", now, () => {});
-    }
-  });
-}
-setInterval(cleanup, 10 * 60 * 1000);
+// =========================
+// 404
+// =========================
+app.use((req, res) => {
+  res.status(404).json({ ok: false, error: "Not Found" });
+});
 
-const port = Number(process.env.PORT || 10000);
-app.listen(port, () => {
-  console.log(`Mixtli Backend fix-min root on :${port}`);
+// =========================
+// Start
+// =========================
+app.listen(PORT, () => {
+  console.log(`Mixtli Backend fix-min root on :${PORT}`);
 });
