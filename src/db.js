@@ -1,14 +1,15 @@
-const path = require("path");
+// src/db.js
 const fs = require("fs");
+const path = require("path");
 const sqlite3 = require("sqlite3").verbose();
 
 const DATA_DIR = process.env.DATA_DIR || "./data";
-const DB_PATH = path.join(DATA_DIR, "mixtli.sqlite");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+const DB_PATH = path.join(DATA_DIR, "mixtli.sqlite");
 
 const db = new sqlite3.Database(DB_PATH);
 
-db.serialize(()=>{
+db.serialize(() => {
   db.run(`CREATE TABLE IF NOT EXISTS users(
     id TEXT PRIMARY KEY,
     plan TEXT NOT NULL DEFAULT 'free',
