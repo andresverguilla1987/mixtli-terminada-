@@ -1,0 +1,18 @@
+[
+  {
+    "Version": 1,
+    "Rules": [
+      {
+        "ID": "expire-link-after-7-days",
+        "Status": "Enabled",
+        "Filter": { "Prefix": "link/" },
+        "Expiration": { "Days": 7 }
+      },
+      {
+        "ID": "abort-incomplete-mpu-7-days",
+        "Status": "Enabled",
+        "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+      }
+    ]
+  }
+]
