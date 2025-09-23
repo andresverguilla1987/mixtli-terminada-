@@ -1,19 +1,19 @@
 {
-  "name": "mixtli-backend-v2-sqlite3",
-  "version": "2.1.0",
+  "name": "mixtli-cheap-egress-backend",
+  "version": "1.0.0",
   "type": "commonjs",
-  "description": "Mixtli backend with sqlite3-only persistence, rate limiting, and cleanup",
-  "main": "server.js",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node src/server.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.620.0",
-    "@aws-sdk/s3-request-presigner": "^3.620.0",
+    "@aws-sdk/client-s3": "^3.637.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.0",
+    "morgan": "^1.10.0",
+    "nanoid": "^5.0.7",
     "sqlite3": "^5.1.7"
   }
 }
