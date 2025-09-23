@@ -1,32 +1,58 @@
-# Mixtli Transfer (solo transferencias)
 
-Backend minimal tipo WeTransfer para Render + Cloudflare R2.
+# Mixtli Transfer Backend
+
+Express backend listo para Render/Node que genera URLs firmadas (presigned) para subir archivos directamente a un storage S3‑compatible (Cloudflare R2).
 
 ## Endpoints
-- `POST /api/presign` → crea transferencia y devuelve `uploadUrl` firmado para PUT directo a R2
-- `POST /api/commit` → marca archivo como terminado
-- `POST /api/share` → devuelve `code` y url `/s/:code`
-- `GET /s/:code` → lista archivos de esa transferencia
-- `GET /api/readlink?key=...` → URL temporal firmado para descarga
 
-Cabezera obligatoria: `x-mixtli-token` (identifica al usuario/sesión).
+- `GET /salud` — Health check.
+- `POST /api/presign` — Crea un **PUT presign** para subir directo a R2.
+  - Body JSON: `{ "filename": "ejemplo.jpg", "contentType": "image/jpeg" }`
+  - Respuesta: `{ ok, key, url, expiresAt }`
 
-## CORS del bucket (R2)
-Configura en Cloudflare R2:
-```json
-[
-  {
-    "AllowedOrigins": ["https://tu-sitio.netlify.app","http://localhost:8080"],
-    "AllowedMethods": ["PUT","GET","HEAD","OPTIONS"],
-    "AllowedHeaders": ["*"],
-    "ExposeHeaders": ["etag","content-length"],
-    "MaxAgeSeconds": 86400
-  }
-]
+## Variables de entorno
+
+Copiar `.env.example` a `.env` y llenar:
+
+```env
+PORT=10000
+ALLOWED_ORIGINS=["http://localhost:5173"]
+
+UPLOAD_PREFIX=uploads/
+
+S3_ENDPOINT=https://<accountid>.r2.cloudflarestorage.com
+S3_BUCKET=<tu-bucket>
+S3_REGION=auto
+S3_FORCE_PATH_STYLE=true
+S3_ACCESS_KEY_ID=<tu-access-key-id>
+S3_SECRET_ACCESS_KEY=<tu-secret>
+PRESIGN_EXPIRES=900
 ```
 
-## Render
-Start command:
+> **Notas R2:** Usa **S3 API Tokens** (Access Key ID y Secret) de Cloudflare R2. El endpoint **no** lleva el nombre del bucket en la URL; eso va en `S3_BUCKET`.
+
+## Deploy en Render
+
+1. Crea un nuevo **Web Service** (Node).
+2. Build Command: `npm install --no-audit --no-fund`
+3. Start Command: `node server.js`
+4. Node 18+.
+5. Añade las variables de entorno arriba.
+6. Verifica `GET /salud` en logs y en el navegador.
+
+## Ejemplo de uso (front)
+
+```js
+const r = await fetch("https://TU-BACKEND.onrender.com/api/presign", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ filename: file.name, contentType: file.type })
+});
+const data = await r.json();
+// Luego subir directo:
+await fetch(data.url, { method: "PUT", body: file, headers: { "Content-Type": file.type } });
 ```
-npm install --omit=dev --no-audit --no-fund && npm start
-```
+
+---
+
+_Folder generado: 2025-09-23T23:12:24.227969Z_
