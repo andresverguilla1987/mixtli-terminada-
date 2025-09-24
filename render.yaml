@@ -1,52 +1,22 @@
-# Render Blueprint for Mixtli Transfer Backend
-# Docs: https://render.com/docs/blueprint-spec
-
 services:
   - type: web
-    name: mixtli-transfer-backend
+    name: mixtli-backend-compat
     env: node
-    region: oregon          # Cambia si te conviene otro (e.g., frankfurt)
-    plan: free              # Cambia a starter/standard según uso
-    branch: main            # Rama del repo
+    region: oregon
+    plan: starter
+    branch: main
     autoDeploy: true
     buildCommand: |
       npm ci --no-audit --no-fund || npm install --no-audit --no-fund
     startCommand: node server.js
     healthCheckPath: /api/health
-
-    # Variables de entorno: ajusta valores placeholder antes de aplicar
     envVars:
       - key: NODE_VERSION
         value: "20"
       - key: PORT
         value: "10000"
       - key: ALLOWED_ORIGINS
-        value: '["https://TU-SITIO.netlify.app","http://localhost:5173"]'
-
-      - key: UPLOAD_PREFIX
-        value: "uploads/"
-
-      # --- Cloudflare R2 (S3 compatible) ---
-      - key: S3_ENDPOINT
-        value: "https://<accountid>.r2.cloudflarestorage.com"
-      - key: S3_BUCKET
-        value: "<tu-bucket>"
-      - key: S3_REGION
-        value: "auto"
-      - key: S3_FORCE_PATH_STYLE
-        value: "true"
-
-      # Secrets: crea estos en Render → Secrets, o edítalos aquí si no usarás secrets
-      - key: S3_ACCESS_KEY_ID
-        fromSecret: r2-access-key-id
-      - key: S3_SECRET_ACCESS_KEY
-        fromSecret: r2-secret-access-key
-
-      # Presign TTL (segundos)
-      - key: PRESIGN_EXPIRES
-        value: "900"
-
-      # Seguridad opcional: si tu backend exige token en headers
+        value: '["https://unrivaled-churros-366919.netlify.app","http://localhost:5173"]'
       - key: REQUIRE_TOKEN
         value: "false"
       - key: X_MIXTLI_TOKEN
